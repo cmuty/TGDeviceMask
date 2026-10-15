@@ -1,0 +1,35 @@
+name: Build rootless deb
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: brew install dpkg ldid
+      - name: Install Theos
+        run: git clone --recursive --depth 1 https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
+      - name: Build package
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: make clean package FINALPACKAGE=1
+      - name: Check package paths and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=(packages/*.deb)
+          test "${#package[@]}" -eq 1
+          test "$(dpkg-deb -f "${package[0]}" Architecture)" = iphoneos-arm64
+          dpkg-deb -c "${package[0]}" | tee package-contents.txt
+          grep -F '/var/jb/Library/MobileSubstrate/DynamicLibraries/TGDeviceMask.dylib' package-contents.txt
+          grep -F '/var/jb/Library/Application Support/TGDeviceMask/config.plist' package-contents.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TGDeviceMask-rootless
+          path: |
+            packages/*.deb
+            package-contents.txt
+          if-no-files-found: error
