@@ -24,8 +24,8 @@ jobs:
           test "${#package[@]}" -eq 1
           test "$(dpkg-deb -f "${package[0]}" Architecture)" = iphoneos-arm64
           dpkg-deb -c "${package[0]}" | tee package-contents.txt
-          grep -F '/var/jb/Library/MobileSubstrate/DynamicLibraries/TGDeviceMask.dylib' package-contents.txt
-          grep -F '/var/jb/Library/Application Support/TGDeviceMask/config.plist' package-contents.txt
+          grep -F 'var/jb/Library/MobileSubstrate/DynamicLibraries/TGDeviceMask.dylib' package-contents.txt
+          grep -F 'var/jb/Library/Application Support/TGDeviceMask/config.plist' package-contents.txt
       - uses: actions/upload-artifact@v4
         with:
           name: TGDeviceMask-rootless
