@@ -5,7 +5,14 @@
     <key>Filter</key>
     <dict>
         <key>Bundles</key>
-        <array><string>ph.telegra.Telegraph</string></array>
+        <array>
+            <string>ph.telegra.Telegraph</string>
+            <string>ph.telegra.Telegraph.NotificationService</string>
+            <string>ph.telegra.Telegraph.NotificationContent</string>
+            <string>ph.telegra.Telegraph.Share</string>
+            <string>ph.telegra.Telegraph.Widget</string>
+            <string>ph.telegra.Telegraph.SiriIntents</string>
+        </array>
     </dict>
 </dict>
 </plist>

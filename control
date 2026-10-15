@@ -1,6 +1,6 @@
 Package: local.telegram.devicemask
 Name: TGDeviceMask
-Version: 1.0.1
+Version: 1.0.2
 Architecture: iphoneos-arm64
 Description: Telegram-only device model override for rootless jailbreaks.
 Maintainer: Local

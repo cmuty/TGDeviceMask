@@ -13,6 +13,13 @@ static NSString *gDisplayName;
 static NSString *gLogPath;
 static NSUInteger gLogBytes;
 
+static BOOL TGIsAllowedBundle(NSString *bundle) {
+    // Keep this exact list aligned with the loader filter; no prefix matching.
+    return [@[@"ph.telegra.Telegraph", @"ph.telegra.Telegraph.NotificationService",
+        @"ph.telegra.Telegraph.NotificationContent", @"ph.telegra.Telegraph.Share",
+        @"ph.telegra.Telegraph.Widget", @"ph.telegra.Telegraph.SiriIntents"] containsObject:bundle ?: @""];
+}
+
 // Use the application's writable container so diagnostics survive sandbox restrictions.
 static void TGLog(NSString *message) {
     NSLog(@"[TGDeviceMask] %@", message);
@@ -192,16 +199,17 @@ static BOOL TGLoadConfiguration(void) {
 %ctor {
     @autoreleasepool {
         // The loader filter and this runtime guard independently restrict the target.
-        if (![[NSBundle mainBundle].bundleIdentifier isEqualToString:@"ph.telegra.Telegraph"]) {
+        NSString *bundle = [NSBundle mainBundle].bundleIdentifier;
+        if (!TGIsAllowedBundle(bundle)) {
             return;
         }
         gLogPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TGDeviceMask-diagnostics.txt"];
         NSError *logError = nil;
-        if (![@"TGDeviceMask 1.0.1\n" writeToFile:gLogPath atomically:YES
+        if (![@"TGDeviceMask 1.0.2\n" writeToFile:gLogPath atomically:YES
             encoding:NSUTF8StringEncoding error:&logError]) {
             NSLog(@"[TGDeviceMask] Cannot create diagnostic file: %@", logError);
         }
-        TGLog([NSString stringWithFormat:@"Loaded into Telegram %@ (%@)",
+        TGLog([NSString stringWithFormat:@"Loaded into %@ %@ (%@)", bundle,
             [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
             [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]]);
         if (!TGLoadConfiguration()) {
