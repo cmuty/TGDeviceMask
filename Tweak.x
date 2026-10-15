@@ -1,13 +1,37 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <rootless.h>
+#import <dispatch/dispatch.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
 
 static NSString *gIdentifier;
 static NSString *gDisplayName;
+static NSString *gLogPath;
+static NSUInteger gLogBytes;
+
+// Use the application's writable container so diagnostics survive sandbox restrictions.
+static void TGLog(NSString *message) {
+    NSLog(@"[TGDeviceMask] %@", message);
+    if (gLogPath == nil) {
+        return;
+    }
+    @synchronized (gLogPath) {
+        NSData *line = [[NSString stringWithFormat:@"%@ %@\n", [NSDate date], message]
+            dataUsingEncoding:NSUTF8StringEncoding];
+        if (gLogBytes + line.length > 16384) {
+            return;
+        }
+        FILE *file = fopen(gLogPath.fileSystemRepresentation, "ab");
+        if (file != NULL) {
+            gLogBytes += fwrite(line.bytes, 1, line.length, file);
+            fclose(file);
+        }
+    }
+}
 
 // Preserve the two-call sysctl size-query protocol, including the terminator.
 static int TGCopyMachine(void *output, size_t *outputLength) {
@@ -41,20 +65,20 @@ static BOOL TGLoadConfiguration(void) {
     id root = data == nil ? nil : [NSPropertyListSerialization
         propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&error];
     if (![root isKindOfClass:[NSDictionary class]]) {
-        NSLog(@"[TGDeviceMask] Configuration missing or invalid: %@ (%@)", path, error);
+        TGLog([NSString stringWithFormat:@"Configuration missing or invalid: %@ (%@)", path, error]);
         return NO;
     }
     NSDictionary *config = root;
     id enabled = config[@"Enabled"];
     if (![enabled isKindOfClass:[NSNumber class]] || ![enabled boolValue]) {
-        NSLog(@"[TGDeviceMask] Disabled by configuration");
+        TGLog(@"Disabled by configuration");
         return NO;
     }
     id identifier = config[@"ModelIdentifier"];
     id displayName = config[@"DisplayName"];
     if (![identifier isKindOfClass:[NSString class]] ||
         ![displayName isKindOfClass:[NSString class]]) {
-        NSLog(@"[TGDeviceMask] ModelIdentifier and DisplayName must be strings");
+        TGLog(@"ModelIdentifier and DisplayName must be strings");
         return NO;
     }
     NSString *identifierString = identifier;
@@ -66,7 +90,7 @@ static BOOL TGLoadConfiguration(void) {
         identifierString.length == 0 || byteLength >= sizeof(((struct utsname *)0)->machine) ||
         displayString.length == 0 || displayString.length > 64 ||
         [displayString rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
-        NSLog(@"[TGDeviceMask] Invalid model value; no hooks installed");
+        TGLog(@"Invalid model value; no hooks installed");
         return NO;
     }
     gIdentifier = [identifierString copy];
@@ -103,27 +127,60 @@ static BOOL TGLoadConfiguration(void) {
 
 %end
 
-%group TelegramEnvironment
+%group TelegramInitializer
 
 %hook MTApiEnvironment
 
 // Supplying the name at initialization also keeps the API initialization hash consistent.
 - (id)initWithDeviceModelName:(NSString *)name {
     (void)name;
-    return %orig(gDisplayName);
+    id result = %orig(gDisplayName);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        TGLog([NSString stringWithFormat:@"Model initializer intercepted; supplied %@", gDisplayName]);
+    });
+    return result;
 }
+
+%end
+%end
+
+%group TelegramPlatform
+%hook MTApiEnvironment
 
 - (NSString *)platform {
     return gIdentifier;
 }
 
+%end
+%end
+
+%group TelegramPlatformString
+%hook MTApiEnvironment
+
 - (NSString *)platformString {
     return gDisplayName;
 }
 
+%end
+%end
+
+%group TelegramModel
+%hook MTApiEnvironment
+
 - (NSString *)deviceModel {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        TGLog([NSString stringWithFormat:@"deviceModel getter intercepted; returning %@", gDisplayName]);
+    });
     return gDisplayName;
 }
+
+%end
+%end
+
+%group TelegramModelName
+%hook MTApiEnvironment
 
 - (NSString *)deviceModelName {
     return gDisplayName;
@@ -138,24 +195,58 @@ static BOOL TGLoadConfiguration(void) {
         if (![[NSBundle mainBundle].bundleIdentifier isEqualToString:@"ph.telegra.Telegraph"]) {
             return;
         }
+        gLogPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TGDeviceMask-diagnostics.txt"];
+        NSError *logError = nil;
+        if (![@"TGDeviceMask 1.0.1\n" writeToFile:gLogPath atomically:YES
+            encoding:NSUTF8StringEncoding error:&logError]) {
+            NSLog(@"[TGDeviceMask] Cannot create diagnostic file: %@", logError);
+        }
+        TGLog([NSString stringWithFormat:@"Loaded into Telegram %@ (%@)",
+            [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
+            [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"]]);
         if (!TGLoadConfiguration()) {
             return;
         }
-        Class environment = NSClassFromString(@"MTApiEnvironment");
-        const SEL required[] = {
-            @selector(initWithDeviceModelName:), @selector(platform),
-            @selector(platformString), @selector(deviceModel), @selector(deviceModelName)
-        };
-        BOOL compatible = environment != Nil;
-        for (size_t i = 0; compatible && i < sizeof(required) / sizeof(required[0]); ++i) {
-            compatible = class_getInstanceMethod(environment, required[i]) != NULL;
+        // Hardware queries do not depend on Telegram's private Objective-C interface.
+        %init(HardwareQueries);
+        struct utsname info;
+        if (uname(&info) == 0) {
+            TGLog([NSString stringWithFormat:@"uname self-check: %s", info.machine]);
         }
-        if (!compatible) {
-            NSLog(@"[TGDeviceMask] MTApiEnvironment interface unavailable; no hooks installed");
+        char machine[256] = {0};
+        size_t machineLength = sizeof(machine);
+        if (sysctlbyname("hw.machine", machine, &machineLength, NULL, 0) == 0) {
+            TGLog([NSString stringWithFormat:@"sysctlbyname self-check: %s", machine]);
+        }
+        Class environment = NSClassFromString(@"MTApiEnvironment");
+        if (environment == Nil) {
+            TGLog(@"MTApiEnvironment not found at load; only hardware hooks requested");
             return;
         }
-        %init(HardwareQueries);
-        %init(TelegramEnvironment, MTApiEnvironment = environment);
-        NSLog(@"[TGDeviceMask] Hooks requested: %@ / %@", gIdentifier, gDisplayName);
+        const SEL selectors[] = {
+            @selector(initWithDeviceModelName:), @selector(platform), @selector(platformString),
+            @selector(deviceModel), @selector(deviceModelName)
+        };
+        for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); ++i) {
+            TGLog([NSString stringWithFormat:@"Method %@: %@", NSStringFromSelector(selectors[i]),
+                class_getInstanceMethod(environment, selectors[i]) != NULL ? @"present" : @"missing"]);
+        }
+        // A missing optional method must not disable unrelated hooks.
+        if (class_getInstanceMethod(environment, @selector(initWithDeviceModelName:)) != NULL) {
+            %init(TelegramInitializer, MTApiEnvironment = environment);
+        }
+        if (class_getInstanceMethod(environment, @selector(platform)) != NULL) {
+            %init(TelegramPlatform, MTApiEnvironment = environment);
+        }
+        if (class_getInstanceMethod(environment, @selector(platformString)) != NULL) {
+            %init(TelegramPlatformString, MTApiEnvironment = environment);
+        }
+        if (class_getInstanceMethod(environment, @selector(deviceModel)) != NULL) {
+            %init(TelegramModel, MTApiEnvironment = environment);
+        }
+        if (class_getInstanceMethod(environment, @selector(deviceModelName)) != NULL) {
+            %init(TelegramModelName, MTApiEnvironment = environment);
+        }
+        TGLog([NSString stringWithFormat:@"Hook setup finished: %@ / %@", gIdentifier, gDisplayName]);
     }
 }
